@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Local manifest: LineageOS 24.0 (Android 17) for the CMF Phone 1 ("Tetris", MT6878).
+
+  Clone this repository as .repo/local_manifests (repo reads every *.xml here),
+  then `repo sync`. See README.md.
+
+  Device, vendor and kernel trees are maintained by https://github.com/CMF-Phone-1.
+  Their branches are not LineageOS-specific: apply-patches.sh retargets the
+  device tree from BlissROMs to LineageOS after every sync.
+-->
+<manifest>
+  <remote name="tetris-gh" fetch="https://github.com" />
+
+  <!-- Device-specific. These three move together: keep them on matching branches. -->
+  <project path="device/nothing/Tetris"
+           name="CMF-Phone-1/android_device_nothing_Tetris"
+           remote="tetris-gh" revision="xylobium" />
+  <project path="device/nothing/Tetris-kernel"
+           name="CMF-Phone-1/android_device_nothing_Tetris-kernel"
+           remote="tetris-gh" revision="a17" clone-depth="1" />
+  <!-- Proprietary blobs from Nothing OS 4.1 (Tetris_B4.1-260615). Uses git-lfs. -->
+  <project path="vendor/nothing/Tetris"
+           name="CMF-Phone-1/proprietary_vendor_nothing_Tetris"
+           remote="tetris-gh" revision="xylobium" clone-depth="1" />
+
+  <!-- MediaTek common code. Not in LineageOS's default manifest. -->
+  <project path="hardware/mediatek"
+           name="LineageOS/android_hardware_mediatek"
+           remote="tetris-gh" revision="lineage-24.0" />
+  <project path="device/mediatek/sepolicy_vndr"
+           name="LineageOS/android_device_mediatek_sepolicy_vndr"
+           remote="tetris-gh" revision="lineage-24.0" />
+
+  <!-- Dolby Atmos: HAL + the DolbyAtmos settings app that device.mk installs. -->
+  <project path="hardware/dolby"
+           name="swiitch-OFF-Lab/hardware_dolby"
+           remote="tetris-gh" revision="sony-A17" />
+  <project path="packages/apps/DolbyUI"
+           name="swiitch-OFF-Lab/packages_apps_DolbyUI"
+           remote="tetris-gh" revision="a" />
+</manifest>

@@ -1,0 +1,69 @@
+From 00e223c82aa4acf7d15a4e7b556897af19d4a1ff Mon Sep 17 00:00:00 2001
+From: sreelekshman <sreelekshmanchunakara@gmail.com>
+Date: Thu, 9 Jul 2026 21:28:57 +0530
+Subject: [PATCH] Aperture: Force 16:9 aspect ratio when 60 FPS is requested
+
+Force the preview aspect ratio strategy to 16:9 when 60 FPS video
+recording is requested. This bypasses a MediaTek HAL limitation that
+drops 60 FPS requests if the preview or video streams default to 4:3.
+
+Change-Id: Ib9ed853afb8f40f00d4eacc25d21daf9974aac48
+Signed-off-by: sreelekshman <sreelekshmanchunakara@gmail.com>
+---
+ .../org/lineageos/aperture/CameraActivity.kt  | 22 +++++++++++++++++++
+ 1 file changed, 22 insertions(+)
+
+diff --git a/app/src/main/java/org/lineageos/aperture/CameraActivity.kt b/app/src/main/java/org/lineageos/aperture/CameraActivity.kt
+index 4171dcf4..1840ea92 100644
+--- a/app/src/main/java/org/lineageos/aperture/CameraActivity.kt
++++ b/app/src/main/java/org/lineageos/aperture/CameraActivity.kt
+@@ -108,6 +108,7 @@ import org.lineageos.aperture.models.CameraMode
+ import org.lineageos.aperture.models.CameraState
+ import org.lineageos.aperture.models.Event
+ import org.lineageos.aperture.models.FlashMode
++import org.lineageos.aperture.models.FrameRate
+ import org.lineageos.aperture.models.GestureAction
+ import org.lineageos.aperture.models.GridMode
+ import org.lineageos.aperture.models.HardwareKey
+@@ -1593,6 +1594,16 @@ open class CameraActivity : AppCompatActivity(R.layout.activity_camera) {
+                         )
+                         .build()
+ 
++                viewModel.cameraController.previewResolutionSelector =
++                    ResolutionSelector.Builder()
++                        .setAspectRatioStrategy(
++                            AspectRatioStrategy(
++                                cameraConfiguration.photoAspectRatio,
++                                AspectRatioStrategy.FALLBACK_RULE_AUTO,
++                            )
++                        )
++                        .build()
++
+                 CameraController.IMAGE_CAPTURE
+             }
+ 
+@@ -1618,6 +1629,15 @@ open class CameraActivity : AppCompatActivity(R.layout.activity_camera) {
+                     "Video dynamic range not supported with the requested video quality"
+                 }
+ 
++                viewModel.cameraController.previewResolutionSelector =
++                    if (cameraConfiguration.videoFrameRate == FrameRate.FPS_60) {
++                        ResolutionSelector.Builder()
++                            .setAspectRatioStrategy(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
++                            .build()
++                    } else {
++                        null
++                    }
++
+                 // Set the quality
+                 viewModel.cameraController.videoCaptureQualitySelector =
+                     QualitySelector.from(cameraConfiguration.videoQuality)
+@@ -1647,6 +1667,8 @@ open class CameraActivity : AppCompatActivity(R.layout.activity_camera) {
+                     viewModel.cameraExecutor, viewModel.qrImageAnalyzer
+                 )
+ 
++                viewModel.cameraController.previewResolutionSelector = null
++
+                 CameraController.IMAGE_ANALYSIS
+             }
+         }
