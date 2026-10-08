@@ -88,6 +88,69 @@ retarget_device_tree() {
     info "retargeted $DT_REL to lineage_Tetris"
 }
 
+# LineageOS sets BUILD_BROKEN_SRC_DIR_RW_ALLOWLIST (vendor/lineage/config/BoardConfigLineage.mk).
+# On Android 17, soong refuses to start when the device ALSO sets
+# BUILD_BROKEN_SRC_DIR_IS_WRITABLE := true ("Product source tree has been set as
+# ReadWrite, RW allowlist not necessary"). BlissROMs sets no allowlist, so the
+# upstream tree carries the flag. Drop it.
+drop_src_dir_writable() {
+    local bc="$DT/BoardConfig.mk"
+    if ! grep -qE '^BUILD_BROKEN_SRC_DIR_IS_WRITABLE[[:space:]]*:=[[:space:]]*true' "$bc"; then
+        info "BUILD_BROKEN_SRC_DIR_IS_WRITABLE not set - skipped"
+        return
+    fi
+    [[ -z "$(g "$DT_REL" status --porcelain)" ]] \
+        || die "$DT_REL has uncommitted changes - commit or stash them, then re-run"
+    sed -i.orig '/^BUILD_BROKEN_SRC_DIR_IS_WRITABLE[[:space:]]*:=[[:space:]]*true/d' "$bc"
+    rm -f "$bc.orig"
+    if grep -q 'BUILD_BROKEN_SRC_DIR_IS_WRITABLE' "$bc"; then
+        g "$DT_REL" checkout -q -- BoardConfig.mk
+        die "could not remove BUILD_BROKEN_SRC_DIR_IS_WRITABLE from BoardConfig.mk (rolled back)"
+    fi
+    g "$DT_REL" commit -q -am "Tetris: Drop BUILD_BROKEN_SRC_DIR_IS_WRITABLE" \
+        -m "Conflicts with LineageOS's BUILD_BROKEN_SRC_DIR_RW_ALLOWLIST on Android 17."
+    info "dropped BUILD_BROKEN_SRC_DIR_IS_WRITABLE from $DT_REL/BoardConfig.mk"
+}
+
+# LineageOS 24.0 removed doze_settings_help_title / doze_settings_help_text from the
+# shared devicesettings resources (packages/resources/devicesettings), but the device
+# tree's NothingDoze app still shows them in its first-run help dialog, so its Kotlin
+# compile fails with "unresolved reference 'doze_settings_help_title'". Provide the
+# English strings in the app itself, verbatim from lineage-23.2. Skipped when the app
+# no longer uses them or something already defines them.
+add_doze_help_strings() {
+    local app_rel="app/doze" lib="$TOP/packages/resources/devicesettings/res/values/strings.xml"
+    local file_rel="$app_rel/res/values/strings_doze_help.xml"
+    if ! grep -rqs 'R\.string\.doze_settings_help_title' "$DT/$app_rel/src"; then
+        info "NothingDoze does not use doze_settings_help_* - skipped"
+        return
+    fi
+    if grep -qs 'name="doze_settings_help_title"' "$lib" \
+       || grep -rqs 'name="doze_settings_help_title"' "$DT/$app_rel/res/values"; then
+        info "doze_settings_help_* already defined - skipped"
+        return
+    fi
+    [[ -z "$(g "$DT_REL" status --porcelain)" ]] \
+        || die "$DT_REL has uncommitted changes - commit or stash them, then re-run"
+    cat > "$DT/$file_rel" <<'EOF'
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+     SPDX-FileCopyrightText: The LineageOS Project
+     SPDX-License-Identifier: Apache-2.0
+-->
+<resources>
+    <!-- Removed from packages/resources/devicesettings in LineageOS 24.0.
+         Copied verbatim from its lineage-23.2 branch. -->
+    <string name="doze_settings_help_title">Help</string>
+    <string name="doze_settings_help_text">These features use sensor events to launch a doze notification pulse. The chosen sensor is only enabled when the device receives a notification, this helps to reduce battery usage. There is also an option to enable the chosen sensor as soon as the screen turns off, this will cause higher battery usage.</string>
+</resources>
+EOF
+    g "$DT_REL" add "$file_rel"
+    g "$DT_REL" commit -q -m "Tetris: doze: Provide help strings dropped from devicesettings" \
+        -m "LineageOS 24.0 removed doze_settings_help_title/_text from packages/resources/devicesettings."
+    info "added doze_settings_help_* to $DT_REL/$file_rel"
+}
+
 apply_patches() {
     local dir proj patch name
     [[ -d "$HERE/patches" ]] || return 0
@@ -111,5 +174,7 @@ apply_patches() {
 }
 
 retarget_device_tree
+drop_src_dir_writable
+add_doze_help_strings
 apply_patches
 info "done"

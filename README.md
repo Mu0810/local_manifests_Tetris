@@ -25,6 +25,11 @@ Needs x86_64 Linux, roughly 400 GB of disk and 32-64 GB of RAM (see the
 [LineageOS build guide](https://wiki.lineageos.org/devices/Spacewar/build/) for host packages,
 `repo` and `git-lfs`, which the vendor tree requires).
 
+On a minimal or cloud Ubuntu image, also install AOSP's
+[required packages](https://source.android.com/docs/setup/start/requirements). The LineageOS
+list assumes desktop Ubuntu, where `unzip` and `fontconfig` come preinstalled, and without
+`unzip` the build fails about half an hour into the compile. `build.sh` checks for it up front.
+
 **Own machine:**
 
 ```bash

@@ -19,6 +19,19 @@ JOBS="${JOBS:-$(nproc)}"
 [[ "$(uname -s)-$(uname -m)" == "Linux-x86_64" ]] \
     || { echo "build: Android builds need x86_64 Linux (this is $(uname -s) $(uname -m))" >&2; exit 1; }
 
+# Host tools the build shells out to. The LineageOS package list assumes desktop
+# Ubuntu, where unzip comes preinstalled; minimal and cloud images lack it, and the
+# build then fails about 30 minutes into the compile. Fail here instead.
+missing=()
+for t in git git-lfs repo python3 zip unzip; do
+    command -v "$t" >/dev/null 2>&1 || missing+=("$t")
+done
+if (( ${#missing[@]} )); then
+    echo "build: missing host tools: ${missing[*]}" >&2
+    echo "build: install the LineageOS host packages plus AOSP's (adds unzip, fontconfig); see README.md" >&2
+    exit 1
+fi
+
 if [[ ! -d .repo ]]; then
     echo "build: initialising LineageOS $BRANCH in $PWD"
     repo init -u https://github.com/LineageOS/android.git -b "$BRANCH" --git-lfs --no-clone-bundle
