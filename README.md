@@ -63,6 +63,11 @@ stops, so a renamed upstream file fails in seconds instead of hours into `m baco
 **Patches** (each `git am`'d into its project, skipped if already applied):
 
 - `packages/apps/Aperture`: 60 FPS video recording on MediaTek (2 patches).
+- `device/nothing/Tetris`: touch game mode. A touch HAL adds **Settings > Display > High
+  touch polling rate**, which switches the touch driver's game mode
+  (`/proc/touchpanel/game_mode`). The driver resets the touch controller every time the
+  screen turns on and does not restore game mode, so the HAL turns it back on. Not yet
+  tested on hardware.
 
 Every change is a local commit, so `repo sync` discards it cleanly and the next run of the
 script re-applies it.

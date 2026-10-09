@@ -1,0 +1,371 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Mu0810 <Mu0810@users.noreply.github.com>
+Date: Fri, 9 Oct 2026 10:30:00 +0000
+Subject: [PATCH] Tetris: touch: Add a HAL for the touch controller's game mode
+
+Exposes the FocalTech driver's game mode (/proc/touchpanel/game_mode)
+as LineageOS's IHighTouchPollingRate, which adds a "High touch polling
+rate" switch to Settings > Display.
+
+The driver resets the controller when the screen turns on and then only
+restores glove, cover and charger mode, so the HAL watches
+debug.tracing.screen_state and turns game mode back on after each
+screen-on. Switching off only writes to the driver while game mode is
+on, so with the switch unused the controller keeps its stock defaults.
+---
+ device.mk                                     |   4 +
+ sepolicy/vendor/file_contexts                 |   3 +
+ sepolicy/vendor/hal_lineage_touch_default.te  |   5 +
+ touch/Android.bp                              |  23 +++
+ touch/HighTouchPollingRate.cpp                | 154 ++++++++++++++++++
+ touch/HighTouchPollingRate.h                  |  38 +++++
+ touch/service.cpp                             |  33 ++++
+ touch/vendor.lineage.touch-service.tetris.rc  |   4 +
+ touch/vendor.lineage.touch-service.tetris.xml |  10 ++
+ 9 files changed, 274 insertions(+)
+ create mode 100644 sepolicy/vendor/hal_lineage_touch_default.te
+ create mode 100644 touch/Android.bp
+ create mode 100644 touch/HighTouchPollingRate.cpp
+ create mode 100644 touch/HighTouchPollingRate.h
+ create mode 100644 touch/service.cpp
+ create mode 100644 touch/vendor.lineage.touch-service.tetris.rc
+ create mode 100644 touch/vendor.lineage.touch-service.tetris.xml
+
+diff --git a/device.mk b/device.mk
+index 1b9678b..db2d557 100644
+--- a/device.mk
++++ b/device.mk
+@@ -339,6 +339,10 @@ PRODUCT_PACKAGES += \
+ PRODUCT_COPY_FILES += \
+     $(LOCAL_PATH)/configs/thermal/thermal_info_config.json:$(TARGET_COPY_OUT_VENDOR)/etc/thermal_info_config.json
+ 
++# Touch
++PRODUCT_PACKAGES += \
++    vendor.lineage.touch-service.tetris
++
+ # USB
+ $(call soong_config_set_bool,android_hardware_mediatek_usb,audio_accessory_supported,true)
+ 
+diff --git a/sepolicy/vendor/file_contexts b/sepolicy/vendor/file_contexts
+index 3181fe4..bc9dfb3 100644
+--- a/sepolicy/vendor/file_contexts
++++ b/sepolicy/vendor/file_contexts
+@@ -18,6 +18,9 @@
+ # Sensors
+ /vendor/bin/hw/vendor\.noth\.hardware\.sensor\.sensor_extension-service    u:object_r:hal_sensors_default_exec:s0
+ 
++# Touch
++/vendor/bin/hw/vendor\.lineage\.touch-service\.tetris    u:object_r:hal_lineage_touch_default_exec:s0
++
+ # Vibrator
+ /dev/aac_richtap                                                           u:object_r:aac_richtap_device:s0
+ /vendor/bin/hw/android\.hardware\.vibrator\.service\.Tetris-richtap        u:object_r:hal_vibrator_default_exec:s0
+diff --git a/sepolicy/vendor/hal_lineage_touch_default.te b/sepolicy/vendor/hal_lineage_touch_default.te
+new file mode 100644
+index 0000000..f150a69
+--- /dev/null
++++ b/sepolicy/vendor/hal_lineage_touch_default.te
+@@ -0,0 +1,5 @@
++allow hal_lineage_touch_default proc_touchpanel:dir r_dir_perms;
++allow hal_lineage_touch_default proc_touchpanel:file rw_file_perms;
++
++# debug.tracing.screen_state, to turn game mode back on after the screen turns on
++get_prop(hal_lineage_touch_default, debug_prop)
+diff --git a/touch/Android.bp b/touch/Android.bp
+new file mode 100644
+index 0000000..7fd9ff9
+--- /dev/null
++++ b/touch/Android.bp
+@@ -0,0 +1,23 @@
++//
++// SPDX-FileCopyrightText: The LineageOS Project
++// SPDX-License-Identifier: Apache-2.0
++//
++
++cc_binary {
++    name: "vendor.lineage.touch-service.tetris",
++    init_rc: ["vendor.lineage.touch-service.tetris.rc"],
++    vintf_fragments: ["vendor.lineage.touch-service.tetris.xml"],
++    relative_install_path: "hw",
++    proprietary: true,
++    srcs: [
++        "HighTouchPollingRate.cpp",
++        "service.cpp",
++    ],
++    shared_libs: [
++        "libbase",
++        "libbinder_ndk",
++        "liblog",
++        "libutils",
++        "vendor.lineage.touch-V1-ndk",
++    ],
++}
+diff --git a/touch/HighTouchPollingRate.cpp b/touch/HighTouchPollingRate.cpp
+new file mode 100644
+index 0000000..070b0ba
+--- /dev/null
++++ b/touch/HighTouchPollingRate.cpp
+@@ -0,0 +1,154 @@
++/*
++ * SPDX-FileCopyrightText: The LineageOS Project
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#define LOG_TAG "vendor.lineage.touch-service.tetris"
++
++#include "HighTouchPollingRate.h"
++
++#include <android-base/file.h>
++#include <android-base/logging.h>
++#include <android-base/properties.h>
++#include <sys/system_properties.h>
++
++#include <chrono>
++#include <cstdint>
++#include <cstdio>
++#include <string>
++#include <string_view>
++#include <thread>
++
++using ::android::base::GetProperty;
++using ::android::base::ReadFileToString;
++using ::android::base::WaitForPropertyCreation;
++using ::android::base::WriteStringToFile;
++
++using namespace std::chrono_literals;
++
++namespace aidl {
++namespace vendor {
++namespace lineage {
++namespace touch {
++
++namespace {
++
++constexpr const char* kGameModePath = "/proc/touchpanel/game_mode";
++// The first line of the node is the driver's own flag, "Game Mode:On" or "Game Mode:Off".
++constexpr const char* kFlagOn = "Game Mode:On";
++
++// Set by DisplayPowerController on every display state change. "2" is Display.STATE_ON.
++constexpr const char* kScreenStateProp = "debug.tracing.screen_state";
++constexpr const char* kScreenOn = "2";
++
++// When the screen turns on, the driver resets the controller (fts_ts_resume ->
++// fts_reset_proc) and does not turn game mode back on: fts_ex_mode_recovery only
++// restores glove, cover and charger mode. The reset lands a little after the
++// property changes, so check at these times after screen-on and write again
++// whenever game mode has been lost.
++constexpr std::chrono::milliseconds kRestoreChecks[] = {300ms,  600ms,  1000ms,
++                                                        1500ms, 2000ms, 3000ms};
++
++// Reading the node returns "Game Mode:On\nReg(0x90)=1\nReg(0x93)=1\n": the driver's
++// flag, then the controller's game mode register (0x90) and the register the driver
++// calls FPS_1000HZ_EN (0x93). Returns the value of register 0x90, or -1.
++int gameModeRegister(const std::string& node) {
++    constexpr std::string_view kKey = "Reg(0x90)=";
++    const size_t pos = node.find(kKey);
++    int value = -1;
++    if (pos == std::string::npos ||
++        std::sscanf(node.c_str() + pos + kKey.size(), "%d", &value) != 1) {
++        return -1;
++    }
++    return value;
++}
++
++}  // namespace
++
++HighTouchPollingRate::HighTouchPollingRate() {
++    std::string node;
++    if (!ReadFileToString(kGameModePath, &node)) {
++        PLOG(ERROR) << "Failed to read " << kGameModePath;
++        return;
++    }
++    mEnabled = node.find(kFlagOn) != std::string::npos;
++}
++
++ndk::ScopedAStatus HighTouchPollingRate::getEnabled(bool* _aidl_return) {
++    std::lock_guard<std::mutex> lock(mLock);
++    *_aidl_return = mEnabled;
++    return ndk::ScopedAStatus::ok();
++}
++
++ndk::ScopedAStatus HighTouchPollingRate::setEnabled(bool enabled) {
++    std::lock_guard<std::mutex> lock(mLock);
++    mEnabled = enabled;
++    if (!enabled) {
++        // system_server applies the saved setting at every boot, so this is called with false
++        // even when the switch was never used. Only undo what was turned on, so that otherwise
++        // the controller keeps its own defaults, as on stock.
++        std::string node;
++        if (ReadFileToString(kGameModePath, &node) && node.find(kFlagOn) == std::string::npos) {
++            return ndk::ScopedAStatus::ok();
++        }
++    }
++    if (!WriteStringToFile(enabled ? "1" : "0", kGameModePath)) {
++        PLOG(ERROR) << "Failed to write " << kGameModePath;
++        return ndk::ScopedAStatus::fromExceptionCode(EX_UNSUPPORTED_OPERATION);
++    }
++    return ndk::ScopedAStatus::ok();
++}
++
++void HighTouchPollingRate::watchScreenState() {
++    // system_server creates the property at the first display state change after boot.
++    if (!WaitForPropertyCreation(kScreenStateProp, 2min)) {
++        LOG(WARNING) << "Still waiting for " << kScreenStateProp
++                     << ": until it appears, game mode will not survive the screen turning off";
++        WaitForPropertyCreation(kScreenStateProp);
++    }
++    const prop_info* pi = __system_property_find(kScreenStateProp);
++    if (pi == nullptr) {
++        LOG(ERROR) << "Failed to find " << kScreenStateProp;
++        return;
++    }
++
++    uint32_t serial = 0;
++    while (true) {
++        uint32_t newSerial = 0;
++        if (!__system_property_wait(pi, serial, &newSerial, nullptr)) continue;
++        serial = newSerial;
++        if (GetProperty(kScreenStateProp, "") == kScreenOn) restoreAfterScreenOn();
++    }
++}
++
++void HighTouchPollingRate::restoreAfterScreenOn() {
++    {
++        std::lock_guard<std::mutex> lock(mLock);
++        if (!mEnabled) return;
++    }
++    std::chrono::milliseconds elapsed = 0ms;
++    for (const auto check : kRestoreChecks) {
++        std::this_thread::sleep_for(check - elapsed);
++        elapsed = check;
++        // Stop if the screen turned off again; the next screen-on starts over.
++        if (GetProperty(kScreenStateProp, "") != kScreenOn) return;
++
++        std::lock_guard<std::mutex> lock(mLock);
++        if (!mEnabled) return;
++        std::string node;
++        if (!ReadFileToString(kGameModePath, &node)) return;  // setEnabled() logged why.
++        const int reg = gameModeRegister(node);
++        // Still on: keep checking, the reset may not have happened yet.
++        if (reg == 1) continue;
++        if (!WriteStringToFile("1", kGameModePath)) {
++            PLOG(ERROR) << "Failed to turn game mode back on";
++            return;
++        }
++        if (reg == 0) LOG(INFO) << "Turned game mode back on after screen-on";
++    }
++}
++
++}  // namespace touch
++}  // namespace lineage
++}  // namespace vendor
++}  // namespace aidl
+diff --git a/touch/HighTouchPollingRate.h b/touch/HighTouchPollingRate.h
+new file mode 100644
+index 0000000..45773d1
+--- /dev/null
++++ b/touch/HighTouchPollingRate.h
+@@ -0,0 +1,38 @@
++/*
++ * SPDX-FileCopyrightText: The LineageOS Project
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#pragma once
++
++#include <aidl/vendor/lineage/touch/BnHighTouchPollingRate.h>
++
++#include <mutex>
++
++namespace aidl {
++namespace vendor {
++namespace lineage {
++namespace touch {
++
++// Drives the FocalTech touch driver's game mode (/proc/touchpanel/game_mode).
++class HighTouchPollingRate : public BnHighTouchPollingRate {
++  public:
++    HighTouchPollingRate();
++
++    ndk::ScopedAStatus getEnabled(bool* _aidl_return) override;
++    ndk::ScopedAStatus setEnabled(bool enabled) override;
++
++    // Never returns. Turns game mode back on after the screen turns on.
++    void watchScreenState();
++
++  private:
++    void restoreAfterScreenOn();
++
++    std::mutex mLock;
++    bool mEnabled = false;  // Guarded by mLock.
++};
++
++}  // namespace touch
++}  // namespace lineage
++}  // namespace vendor
++}  // namespace aidl
+diff --git a/touch/service.cpp b/touch/service.cpp
+new file mode 100644
+index 0000000..3c64089
+--- /dev/null
++++ b/touch/service.cpp
+@@ -0,0 +1,33 @@
++/*
++ * SPDX-FileCopyrightText: The LineageOS Project
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#define LOG_TAG "vendor.lineage.touch-service.tetris"
++
++#include "HighTouchPollingRate.h"
++
++#include <android-base/logging.h>
++#include <android/binder_manager.h>
++#include <android/binder_process.h>
++
++#include <cstdlib>
++#include <memory>
++#include <string>
++#include <thread>
++
++using aidl::vendor::lineage::touch::HighTouchPollingRate;
++
++int main() {
++    ABinderProcess_setThreadPoolMaxThreadCount(0);
++
++    std::shared_ptr<HighTouchPollingRate> htpr = ndk::SharedRefBase::make<HighTouchPollingRate>();
++    const std::string instance = std::string(HighTouchPollingRate::descriptor) + "/default";
++    binder_status_t status = AServiceManager_addService(htpr->asBinder().get(), instance.c_str());
++    CHECK_EQ(status, STATUS_OK) << "Failed to add service " << instance << " " << status;
++
++    std::thread(&HighTouchPollingRate::watchScreenState, htpr).detach();
++
++    ABinderProcess_joinThreadPool();
++    return EXIT_FAILURE;  // should not reach
++}
+diff --git a/touch/vendor.lineage.touch-service.tetris.rc b/touch/vendor.lineage.touch-service.tetris.rc
+new file mode 100644
+index 0000000..b3a3a4c
+--- /dev/null
++++ b/touch/vendor.lineage.touch-service.tetris.rc
+@@ -0,0 +1,4 @@
++service vendor.touch-hal /vendor/bin/hw/vendor.lineage.touch-service.tetris
++    class hal
++    user system
++    group system
+diff --git a/touch/vendor.lineage.touch-service.tetris.xml b/touch/vendor.lineage.touch-service.tetris.xml
+new file mode 100644
+index 0000000..3c2cd7c
+--- /dev/null
++++ b/touch/vendor.lineage.touch-service.tetris.xml
+@@ -0,0 +1,10 @@
++<manifest version="1.0" type="device">
++    <hal format="aidl">
++        <name>vendor.lineage.touch</name>
++        <version>1</version>
++        <interface>
++            <name>IHighTouchPollingRate</name>
++            <instance>default</instance>
++        </interface>
++    </hal>
++</manifest>
